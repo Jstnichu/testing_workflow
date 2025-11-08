@@ -1,4 +1,4 @@
-name: CD - Deploy to AKS
+name: CD - Deploy to AKS (with ACR pull secret)
 
 on:
   workflow_run:
@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ☸️ Step 2: Configure kubeconfig (raw, not base64)
+      # ☸️ Step 2: Configure kubeconfig (raw secret, not base64)
       - name: Configure kubeconfig
         env:
           KUBECONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
@@ -28,14 +28,28 @@ jobs:
           echo "$KUBECONFIG_DATA" > $HOME/.kube/config
           echo "✅ kubeconfig written successfully"
 
-      # 🧱 Step 3: Set image and deploy
+      # 🔐 Step 3: Create or update imagePullSecret for ACR
+      - name: Create ACR pull secret in AKS
+        env:
+          ACR_SERVER: 3aidfacr20082025161558dev.azurecr.io
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          echo "🔐 Creating or updating image pull secret in AKS..."
+          kubectl delete secret acr-secret --ignore-not-found
+          kubectl create secret docker-registry acr-secret \
+            --docker-server=$ACR_SERVER \
+            --docker-username=$ACR_USERNAME \
+            --docker-password=$ACR_PASSWORD
+          echo "✅ ACR pull secret created successfully."
+
+      # 🧱 Step 4: Deploy application with the correct image
       - name: Deploy to AKS
         env:
           IMAGE: 3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           echo "🚀 Deploying image: $IMAGE"
 
-          # Check that the IMAGE variable includes a valid tag
           if [[ "$IMAGE" == *":" && "$IMAGE" == *":" ]]; then
             if [[ "$IMAGE" == *":" ]]; then
               echo "❌ IMAGE tag appears empty. Aborting."
@@ -43,22 +57,24 @@ jobs:
             fi
           fi
 
-          # Check if deployment exists
+          # Update deployment YAML to use pull secret
+          if ! grep -q "imagePullSecrets" k8s/deployment.yaml; then
+            echo "Adding imagePullSecret reference to deployment.yaml"
+            yq -i '.spec.template.spec.imagePullSecrets = [{"name": "acr-secret"}]' k8s/deployment.yaml || true
+          fi
+
+          # Create or update deployment
           if kubectl get deployment sample-app >/dev/null 2>&1; then
             echo "🔄 Updating existing deployment..."
             kubectl set image deployment/sample-app sample-app=$IMAGE
-            echo "⏳ Waiting for rollout to finish..."
             kubectl rollout status deployment/sample-app --timeout=120s
           else
-            echo "🆕 Creating new deployment from manifests..."
-            if grep -q "YOUR_IMAGE_PLACEHOLDER" k8s/deployment.yaml; then
-              sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
-            fi
+            echo "🆕 Creating new deployment..."
+            sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
             kubectl apply -f k8s/
-            echo "✅ Deployment created successfully."
           fi
 
-      # 🧪 Step 4: Verify pods are running
+      # 🧪 Step 5: Verify deployment
       - name: Verify deployment health
         run: |
           echo "🔍 Checking pods..."

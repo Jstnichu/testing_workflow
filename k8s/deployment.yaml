@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  labels:
+    app: sample-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      containers:
+        - name: sample-app
+          # Image will be replaced by CD workflow. The placeholder is intentionally neutral so
+          # the CD job can sed-replace it with the exact tag pushed by CI (for example
+          # 3aidfacr20082025161558dev.azurecr.io/sample-app:<sha>).
+          image: YOUR_IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: "production"

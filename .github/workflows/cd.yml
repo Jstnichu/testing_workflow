@@ -1,4 +1,4 @@
-name: CD - deploy to Kubernetes
+name: CD - Deploy to AKS
 
 on:
   workflow_run:
@@ -9,29 +9,58 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      # 🧾 Step 1: Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ☸️ Step 2: Configure kubeconfig (raw, not base64)
       - name: Configure kubeconfig
         env:
           KUBECONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
         run: |
-          if [ -z "$KUBECONFIG_DATA" ]; then echo "KUBE_CONFIG secret is not set"; exit 1; fi
-          mkdir -p $HOME/.kube
-          echo "$KUBECONFIG_DATA" | base64 --decode > $HOME/.kube/config
-
-      - name: Set image and deploy
-        env:
-          # Use the same commit SHA tag that CI pushed. This reads the head SHA from the
-          # completed CI workflow run so CD only attempts to deploy an image that exists.
-          IMAGE: 3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.event.workflow_run.head_sha }}
-        run: |
-          # Try to update existing deployment using kubectl set image (preferred) so rollout metadata is preserved.
-          if kubectl get deployment sample-app >/dev/null 2>&1; then
-            kubectl set image deployment/sample-app sample-app=$IMAGE || kubectl rollout restart deployment/sample-app
-          else
-            # Replace the placeholder in the manifest with the exact image and apply the manifests
-            sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml || true
-            kubectl apply -f k8s/
+          if [ -z "$KUBECONFIG_DATA" ]; then
+            echo "❌ KUBE_CONFIG secret is not set"; exit 1;
           fi
+          echo "Setting up kubeconfig..."
+          mkdir -p $HOME/.kube
+          echo "$KUBECONFIG_DATA" > $HOME/.kube/config
+          echo "✅ kubeconfig written successfully"
+
+      # 🧱 Step 3: Set image and deploy
+      - name: Deploy to AKS
+        env:
+          IMAGE: 3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          echo "🚀 Deploying image: $IMAGE"
+
+          # Check that the IMAGE variable includes a valid tag
+          if [[ "$IMAGE" == *":" && "$IMAGE" == *":" ]]; then
+            if [[ "$IMAGE" == *":" ]]; then
+              echo "❌ IMAGE tag appears empty. Aborting."
+              exit 1
+            fi
+          fi
+
+          # Check if deployment exists
+          if kubectl get deployment sample-app >/dev/null 2>&1; then
+            echo "🔄 Updating existing deployment..."
+            kubectl set image deployment/sample-app sample-app=$IMAGE
+            echo "⏳ Waiting for rollout to finish..."
+            kubectl rollout status deployment/sample-app --timeout=120s
+          else
+            echo "🆕 Creating new deployment from manifests..."
+            if grep -q "YOUR_IMAGE_PLACEHOLDER" k8s/deployment.yaml; then
+              sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
+            fi
+            kubectl apply -f k8s/
+            echo "✅ Deployment created successfully."
+          fi
+
+      # 🧪 Step 4: Verify pods are running
+      - name: Verify deployment health
+        run: |
+          echo "🔍 Checking pods..."
+          kubectl get pods -o wide
+          echo "✅ Deployment complete."

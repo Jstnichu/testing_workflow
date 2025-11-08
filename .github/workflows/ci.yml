@@ -17,7 +17,17 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          # Use npm ci when a lockfile exists for a clean, reproducible install.
+          # If no lockfile is present (this repo currently may not have one),
+          # fall back to `npm install` which will generate package-lock.json.
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            echo "Lockfile found — running npm ci"
+            npm ci
+          else
+            echo "No lockfile found — running npm install to generate package-lock.json"
+            npm install
+          fi
 
       - name: Run tests
         run: npm test

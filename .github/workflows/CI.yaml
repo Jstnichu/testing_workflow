@@ -2,7 +2,7 @@ name: CD - Deploy to AKS (using raw kubeconfig)
 
 on:
   workflow_run:
-    workflows: ["CD - Deploy to aks cluster"]
+    workflows: ["CI Build iamges and pushing into container"]
     types: [completed]
   workflow_dispatch:
 

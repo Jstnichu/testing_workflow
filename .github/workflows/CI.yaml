@@ -1,101 +1,47 @@
-name: CD - Deploy to AKS (Multi-Environment)
+name: CD - Deploy to AKS (using raw kubeconfig)
 
 on:
   workflow_run:
-    workflows: ["CI - build and push image"]
+    workflows: ["CD - Deploy to aks cluster"]
     types: [completed]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Choose environment to deploy to"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - qa
-          - prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    # Allow environment protection (manual approval for prod)
-    environment:
-      name: ${{ github.event.inputs.environment || 'dev' }}
-      url: ${{ steps.deploy.outputs.app_url }}
 
     steps:
       # 🧾 Step 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ⚙️ Step 2: Set environment variables dynamically
-      - name: Set environment configuration
-        id: envconfig
-        run: |
-          echo "Setting environment config for: ${{ github.event.inputs.environment }}"
-          case "${{ github.event.inputs.environment }}" in
-            dev)
-              echo "ACR_SERVER=3aidfacr-dev.azurecr.io" >> $GITHUB_ENV
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_DEV }}" >> $GITHUB_ENV
-              echo "NAMESPACE=dev" >> $GITHUB_ENV
-              ;;
-            qa)
-              echo "ACR_SERVER=3aidfacr-qa.azurecr.io" >> $GITHUB_ENV
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_QA }}" >> $GITHUB_ENV
-              echo "NAMESPACE=qa" >> $GITHUB_ENV
-              ;;
-            prod)
-              echo "ACR_SERVER=3aidfacr-prod.azurecr.io" >> $GITHUB_ENV
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_PROD }}" >> $GITHUB_ENV
-              echo "NAMESPACE=prod" >> $GITHUB_ENV
-              ;;
-            *)
-              echo "❌ Invalid environment"; exit 1 ;;
-          esac
-
-      # ☸️ Step 3: Configure kubeconfig
+      # ☸️ Step 2: Configure kubeconfig (raw secret, not base64)
       - name: Configure kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
         run: |
+          if [ -z "$KUBECONFIG_DATA" ]; then
+            echo "❌ KUBE_CONFIG secret is not set"; exit 1;
+          fi
+          echo "Setting up kubeconfig..."
           mkdir -p $HOME/.kube
           echo "$KUBECONFIG_DATA" > $HOME/.kube/config
-          echo "✅ Kubeconfig configured for $NAMESPACE"
+          echo "✅ kubeconfig written successfully"
 
-      # 🔐 Step 4: Create or update ACR pull secret
-      - name: Create ACR pull secret in AKS
+      # 🏗️ Step 3: Set image and deploy to AKS
+      - name: Set image and deploy
         env:
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          IMAGE: 3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.event.workflow_run.head_sha }}
         run: |
-          echo "🔐 Creating image pull secret in $NAMESPACE..."
-          kubectl -n $NAMESPACE delete secret acr-secret --ignore-not-found
-          kubectl -n $NAMESPACE create secret docker-registry acr-secret \
-            --docker-server=$ACR_SERVER \
-            --docker-username=$ACR_USERNAME \
-            --docker-password=$ACR_PASSWORD
-          echo "✅ ACR pull secret created."
+          echo "Deploying image: $IMAGE"
 
-      # 🧱 Step 5: Deploy application
-      - name: Deploy to AKS
-        id: deploy
-        env:
-          IMAGE: ${{ env.ACR_SERVER }}/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
-        run: |
-          echo "🚀 Deploying image: $IMAGE to namespace: $NAMESPACE"
-
-          # Update image and pull secret
-          yq -i '.spec.template.spec.imagePullSecrets = [{"name": "acr-secret"}]' k8s/deployment.yaml
-
-          kubectl -n $NAMESPACE apply -f k8s/
-          kubectl -n $NAMESPACE set image deployment/sample-app sample-app=$IMAGE
-          kubectl -n $NAMESPACE rollout status deployment/sample-app --timeout=120s
-
-          echo "app_url=https://$NAMESPACE.example.com" >> $GITHUB_OUTPUT
-
-      # 🧪 Step 6: Verify deployment health
-      - name: Verify deployment
-        run: |
-          echo "🔍 Checking pods in $NAMESPACE..."
-          kubectl -n $NAMESPACE get pods -o wide
-          echo "✅ Deployment complete in $NAMESPACE."
+          # Try updating existing deployment
+          if kubectl get deployment sample-app >/dev/null 2>&1; then
+            echo "Updating existing deployment..."
+            kubectl set image deployment/sample-app sample-app=$IMAGE
+            kubectl rollout status deployment/sample-app
+          else
+            echo "Creating new deployment..."
+            sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
+            kubectl apply -f k8s/
+          fi

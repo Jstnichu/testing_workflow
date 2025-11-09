@@ -30,7 +30,7 @@ Quick local steps
    - For kind: `kind create cluster` then `kubectl apply -f k8s/`.
 
 How CI/CD works in this demo
-- CI (`ci.yml`) runs on push to `main`: installs dependencies, runs tests, logs into Azure Container Registry (`3aidfacr20082025161558dev.azurecr.io`) and pushes two tags (latest and commit sha).
+- CI (`ci.yml`) runs on push to `main`: installs dependencies, runs tests, logs into Azure Container Registry  and pushes two tags (latest and commit sha).
 - CD (`cd.yml`) runs on push to `main` (or manual dispatch): decodes `KUBE_CONFIG` secret, and updates the Deployment image or applies the manifests if missing.
 
 Notes and next steps

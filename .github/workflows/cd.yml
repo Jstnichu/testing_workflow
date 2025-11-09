@@ -1,82 +1,101 @@
-name: CD - Deploy to AKS (with ACR pull secret)
+name: CD - Deploy to AKS (Multi-Environment)
 
 on:
   workflow_run:
     workflows: ["CI - build and push image"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Choose environment to deploy to"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    # Allow environment protection (manual approval for prod)
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+      url: ${{ steps.deploy.outputs.app_url }}
 
     steps:
       # 🧾 Step 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ☸️ Step 2: Configure kubeconfig (raw secret, not base64)
-      - name: Configure kubeconfig
-        env:
-          KUBECONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
+      # ⚙️ Step 2: Set environment variables dynamically
+      - name: Set environment configuration
+        id: envconfig
         run: |
-          if [ -z "$KUBECONFIG_DATA" ]; then
-            echo "❌ KUBE_CONFIG secret is not set"; exit 1;
-          fi
-          echo "Setting up kubeconfig..."
+          echo "Setting environment config for: ${{ github.event.inputs.environment }}"
+          case "${{ github.event.inputs.environment }}" in
+            dev)
+              echo "ACR_SERVER=3aidfacr-dev.azurecr.io" >> $GITHUB_ENV
+              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_DEV }}" >> $GITHUB_ENV
+              echo "NAMESPACE=dev" >> $GITHUB_ENV
+              ;;
+            qa)
+              echo "ACR_SERVER=3aidfacr-qa.azurecr.io" >> $GITHUB_ENV
+              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_QA }}" >> $GITHUB_ENV
+              echo "NAMESPACE=qa" >> $GITHUB_ENV
+              ;;
+            prod)
+              echo "ACR_SERVER=3aidfacr-prod.azurecr.io" >> $GITHUB_ENV
+              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_PROD }}" >> $GITHUB_ENV
+              echo "NAMESPACE=prod" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "❌ Invalid environment"; exit 1 ;;
+          esac
+
+      # ☸️ Step 3: Configure kubeconfig
+      - name: Configure kubeconfig
+        run: |
           mkdir -p $HOME/.kube
           echo "$KUBECONFIG_DATA" > $HOME/.kube/config
-          echo "✅ kubeconfig written successfully"
+          echo "✅ Kubeconfig configured for $NAMESPACE"
 
-      # 🔐 Step 3: Create or update imagePullSecret for ACR
+      # 🔐 Step 4: Create or update ACR pull secret
       - name: Create ACR pull secret in AKS
         env:
-          ACR_SERVER: 3aidfacr20082025161558dev.azurecr.io
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          echo "🔐 Creating or updating image pull secret in AKS..."
-          kubectl delete secret acr-secret --ignore-not-found
-          kubectl create secret docker-registry acr-secret \
+          echo "🔐 Creating image pull secret in $NAMESPACE..."
+          kubectl -n $NAMESPACE delete secret acr-secret --ignore-not-found
+          kubectl -n $NAMESPACE create secret docker-registry acr-secret \
             --docker-server=$ACR_SERVER \
             --docker-username=$ACR_USERNAME \
             --docker-password=$ACR_PASSWORD
-          echo "✅ ACR pull secret created successfully."
+          echo "✅ ACR pull secret created."
 
-      # 🧱 Step 4: Deploy application with the correct image
+      # 🧱 Step 5: Deploy application
       - name: Deploy to AKS
+        id: deploy
         env:
-          IMAGE: 3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
+          IMAGE: ${{ env.ACR_SERVER }}/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          echo "🚀 Deploying image: $IMAGE"
+          echo "🚀 Deploying image: $IMAGE to namespace: $NAMESPACE"
 
-          if [[ "$IMAGE" == *":" && "$IMAGE" == *":" ]]; then
-            if [[ "$IMAGE" == *":" ]]; then
-              echo "❌ IMAGE tag appears empty. Aborting."
-              exit 1
-            fi
-          fi
+          # Update image and pull secret
+          yq -i '.spec.template.spec.imagePullSecrets = [{"name": "acr-secret"}]' k8s/deployment.yaml
 
-          # Update deployment YAML to use pull secret
-          if ! grep -q "imagePullSecrets" k8s/deployment.yaml; then
-            echo "Adding imagePullSecret reference to deployment.yaml"
-            yq -i '.spec.template.spec.imagePullSecrets = [{"name": "acr-secret"}]' k8s/deployment.yaml || true
-          fi
+          kubectl -n $NAMESPACE apply -f k8s/
+          kubectl -n $NAMESPACE set image deployment/sample-app sample-app=$IMAGE
+          kubectl -n $NAMESPACE rollout status deployment/sample-app --timeout=120s
 
-          # Create or update deployment
-          if kubectl get deployment sample-app >/dev/null 2>&1; then
-            echo "🔄 Updating existing deployment..."
-            kubectl set image deployment/sample-app sample-app=$IMAGE
-            kubectl rollout status deployment/sample-app --timeout=120s
-          else
-            echo "🆕 Creating new deployment..."
-            sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
-            kubectl apply -f k8s/
-          fi
+          echo "app_url=https://$NAMESPACE.example.com" >> $GITHUB_OUTPUT
 
-      # 🧪 Step 5: Verify deployment
-      - name: Verify deployment health
+      # 🧪 Step 6: Verify deployment health
+      - name: Verify deployment
         run: |
-          echo "🔍 Checking pods..."
-          kubectl get pods -o wide
-          echo "✅ Deployment complete."
+          echo "🔍 Checking pods in $NAMESPACE..."
+          kubectl -n $NAMESPACE get pods -o wide
+          echo "✅ Deployment complete in $NAMESPACE."

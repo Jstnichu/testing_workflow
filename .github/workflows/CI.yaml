@@ -1,5 +1,4 @@
 name: CD - Deploy to AKS (using raw kubeconfig)
-
 on:
   workflow_run:
     workflows: ["CI Build iamges and pushing into container"]

@@ -75,7 +75,7 @@ jobs:
             echo "ACR=3aidfacr-prod.azurecr.io" >> $GITHUB_ENV
             echo "TAG_SUFFIX=prod" >> $GITHUB_ENV
           else
-            echo "❌ Unknown branch - stopping"
+            echo "Unknown branch - stopping"
             exit 1
           fi
 

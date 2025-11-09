@@ -1,10 +1,20 @@
-name: CI - Build, Test, and Push to ACR
+name: CI - Build, Test, and Push to ACR (Multi-Env)
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - dev
+      - qa
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - qa
+      - dev
+
+env:
+  IMAGE_NAME: sample-app
+  NODE_VERSION: 18
 
 jobs:
   build-and-push:
@@ -19,9 +29,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: ${{ env.NODE_VERSION }}
 
-      # ⚡ Step 3: Cache npm dependencies (based on package-lock.json)
+      # ⚡ Step 3: Cache npm dependencies
       - name: Cache npm dependencies
         uses: actions/cache@v4
         with:
@@ -32,38 +42,62 @@ jobs:
 
       # 📦 Step 4: Install dependencies safely
       - name: Install dependencies
-        shell: bash
         run: |
-          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-            echo "Lockfile found — running npm ci"
+          if [ -f package-lock.json ]; then
             npm ci
           else
-            echo "No lockfile found — running npm install"
             npm install
           fi
 
       # 🧪 Step 5: Run tests
-      - name: Run tests
+      - name: Run unit tests
         run: npm test
 
-      # 🔐 Step 6: Log in to Azure Container Registry (ACR)
+      # 🔎 Step 6 (optional): Run linting for code quality
+      - name: Run lint
+        run: npm run lint || echo "⚠️ Lint warnings found but not failing build."
+
+      # 🏷️ Step 7: Determine target environment and ACR
+      - name: Set environment-specific variables
+        id: env-vars
+        run: |
+          echo "Detecting target environment..."
+          if [[ "${GITHUB_REF##*/}" == "dev" ]]; then
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "ACR=3aidfacr-dev.azurecr.io" >> $GITHUB_ENV
+            echo "TAG_SUFFIX=dev" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "qa" ]]; then
+            echo "ENVIRONMENT=qa" >> $GITHUB_ENV
+            echo "ACR=3aidfacr-qa.azurecr.io" >> $GITHUB_ENV
+            echo "TAG_SUFFIX=qa" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "main" ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "ACR=3aidfacr-prod.azurecr.io" >> $GITHUB_ENV
+            echo "TAG_SUFFIX=prod" >> $GITHUB_ENV
+          else
+            echo "❌ Unknown branch - stopping"
+            exit 1
+          fi
+
+      # 🔐 Step 8: Log in to ACR
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
-          registry: 3aidfacr20082025161558dev.azurecr.io
+          registry: ${{ env.ACR }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      # 🏗️ Step 7: Build and push Docker image
+      # 🏗️ Step 9: Build and push Docker image
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            3aidfacr20082025161558dev.azurecr.io/sample-app:latest
-            3aidfacr20082025161558dev.azurecr.io/sample-app:${{ github.sha }}
+            ${{ env.ACR }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.ACR }}/${{ env.IMAGE_NAME }}:${{ env.TAG_SUFFIX }}
+            ${{ env.ACR }}/${{ env.IMAGE_NAME }}:latest
 
-      # 🧹 Step 8 (optional): Clean up Docker data
+      # 🧹 Step 10: Cleanup Docker cache
       - name: Cleanup
         run: docker system prune -f

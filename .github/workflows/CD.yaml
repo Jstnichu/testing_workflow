@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Select the target environment"
+        description: "Select target environment"
         required: true
         default: "dev"
         type: choice
@@ -20,7 +20,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    # 👇 Enables GitHub Environments (with protection rules for prod)
+    # 👇 Enables environment protection (e.g., manual approval for prod)
     environment:
       name: ${{ github.event.inputs.environment || 'dev' }}
 
@@ -29,28 +29,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ⚙️ Step 2: Set environment-specific configuration
+      # ⚙️ Step 2: Set environment configuration (safe for multiline secrets)
       - name: Set environment configuration
         id: set-env
         run: |
           ENV="${{ github.event.inputs.environment || 'dev' }}"
           echo "Deploying to environment: $ENV"
 
+          # Shared ACR for all envs
+          echo "ACR=3aidfacr20082025161558dev.azurecr.io" >> $GITHUB_ENV
+
           case "$ENV" in
             dev)
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_DEV }}" >> $GITHUB_ENV
-              echo "ACR=3aidfacr20082025161558dev.azurecr.io" >> $GITHUB_ENV
               echo "NAMESPACE=dev" >> $GITHUB_ENV
+              {
+                echo "KUBECONFIG_DATA<<EOF"
+                echo "${{ secrets.KUBE_CONFIG_DEV }}"
+                echo "EOF"
+              } >> $GITHUB_ENV
               ;;
             qa)
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_QA }}" >> $GITHUB_ENV
-              echo "ACR=3aidfacr20082025161558qa.azurecr.io" >> $GITHUB_ENV
               echo "NAMESPACE=qa" >> $GITHUB_ENV
+              {
+                echo "KUBECONFIG_DATA<<EOF"
+                echo "${{ secrets.KUBE_CONFIG_QA }}"
+                echo "EOF"
+              } >> $GITHUB_ENV
               ;;
             prod)
-              echo "KUBECONFIG_DATA=${{ secrets.KUBE_CONFIG_PROD }}" >> $GITHUB_ENV
-              echo "ACR=3aidfacr20082025161558prod.azurecr.io" >> $GITHUB_ENV
               echo "NAMESPACE=prod" >> $GITHUB_ENV
+              {
+                echo "KUBECONFIG_DATA<<EOF"
+                echo "${{ secrets.KUBE_CONFIG_PROD }}"
+                echo "EOF"
+              } >> $GITHUB_ENV
               ;;
             *)
               echo "❌ Invalid environment selected: $ENV"
@@ -58,7 +70,7 @@ jobs:
               ;;
           esac
 
-      # ☸️ Step 3: Configure kubeconfig (raw, not base64)
+      # ☸️ Step 3: Configure kubeconfig safely
       - name: Configure kubeconfig
         run: |
           if [ -z "$KUBECONFIG_DATA" ]; then
@@ -76,6 +88,7 @@ jobs:
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
           echo "🔐 Creating ACR pull secret in namespace $NAMESPACE..."
+          kubectl get ns $NAMESPACE >/dev/null 2>&1 || kubectl create ns $NAMESPACE
           kubectl -n $NAMESPACE delete secret acr-secret --ignore-not-found
           kubectl -n $NAMESPACE create secret docker-registry acr-secret \
             --docker-server=$ACR \
@@ -83,33 +96,29 @@ jobs:
             --docker-password=$ACR_PASSWORD
           echo "✅ ACR pull secret configured."
 
-      # 🏗️ Step 5: Deploy application with the correct image
+      # 🏗️ Step 5: Deploy application
       - name: Deploy to AKS
         env:
           IMAGE: ${{ env.ACR }}/sample-app:${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           echo "🚀 Deploying image: $IMAGE to namespace: $NAMESPACE"
 
-          # Add imagePullSecret if not present
+          # Ensure imagePullSecret reference exists
           if ! grep -q "imagePullSecrets" k8s/deployment.yaml; then
             echo "Adding imagePullSecret to deployment.yaml..."
             yq -i '.spec.template.spec.imagePullSecrets = [{"name": "acr-secret"}]' k8s/deployment.yaml || true
           fi
 
-          # Replace placeholder with actual image
+          # Replace image placeholder
           sed -i "s|YOUR_IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
 
-          # Create namespace if missing
-          kubectl get ns $NAMESPACE >/dev/null 2>&1 || kubectl create ns $NAMESPACE
-
-          # Apply manifests
           echo "Applying Kubernetes manifests..."
           kubectl -n $NAMESPACE apply -f k8s/
 
-          # Update image
+          echo "Updating image in deployment..."
           kubectl -n $NAMESPACE set image deployment/sample-app sample-app=$IMAGE
 
-          # Wait for rollout
+          echo "Waiting for rollout..."
           kubectl -n $NAMESPACE rollout status deployment/sample-app --timeout=180s
 
       # 🧪 Step 6: Verify deployment
@@ -119,3 +128,7 @@ jobs:
           kubectl -n $NAMESPACE get pods -o wide
           kubectl -n $NAMESPACE get svc
           echo "✅ Deployment successful in $NAMESPACE environment."
+      # ✅ Final step: Print success message
+      - name: Print success message
+        run: echo "✅ Application successfully deployed to $NAMESPACE environment."
+        id: success-message
